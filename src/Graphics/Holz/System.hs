@@ -107,8 +107,7 @@ data Window = Window
   , theProgram :: {-# UNPACK #-} !GLuint
   , locationModel :: {-# UNPACK #-} !GLint
   , locationProjection :: {-# UNPACK #-} !GLint
-  , locationDiffuse :: {-# UNPACK #-} !GLint
-  , locationSpecular :: {-# UNPACK #-} !GLint
+  , locationUniform :: ![GLint]
   , keyboardHandlers :: {-# UNPACK #-} !(IORef (Chatter Key -> IO ()))
   , mouseButtonHandlers :: {-# UNPACK #-} !(IORef (Chatter Int -> IO ()))
   , mouseCursorHandlers :: {-# UNPACK #-} !(IORef (V2 Float -> IO ()))
@@ -199,8 +198,7 @@ openWindowEx conf windowmode bbox@(Box (V2 x0 y0) (V2 x1 y1)) = do
 
   locM <- getUniform prog "model"
   locP <- getUniform prog "projection"
-  locD <- getUniform prog "diffuse"
-  locS <- getUniform prog "specular"
+  locU <- C.getUniformLocation conf prog
   hk <- newIORef (const (return ()))
   hb <- newIORef (const (return ()))
   hc <- newIORef (const (return ()))
@@ -208,9 +206,7 @@ openWindowEx conf windowmode bbox@(Box (V2 x0 y0) (V2 x1 y1)) = do
   refKeys <- newIORef ([], [])
   refChars <- newIORef ([], [])
 
-  with (V4 1 1 1 1 :: V4 Float) $ \ptr -> do
-      glUniform4fv locD 1 (castPtr ptr)
-      glUniform4fv locS 1 (castPtr ptr)
+  sequence $ zipWith ($) (C.setInitUniform conf) locU
 
   GLFW.setFramebufferSizeCallback win $ Just
     $ \_ w h -> do
@@ -224,7 +220,7 @@ openWindowEx conf windowmode bbox@(Box (V2 x0 y0) (V2 x1 y1)) = do
   GLFW.setScrollCallback win $ Just $ scrollCallback hs
   GLFW.setCharCallback win $ Just $ \_ ch -> modifyIORef' refChars $ \(str, buf) -> (str, ch : buf)
 
-  return $ Window rbox win prog locM locP locD locS hk hb hc hs refKeys refChars
+  return $ Window rbox win prog locM locP locU hk hb hc hs refKeys refChars
 
 openWindow :: WindowMode -> Box V2 Float -> IO Window
 openWindow = openWindowEx DefaultConfig
@@ -314,18 +310,29 @@ data Vertex = Vertex
 data DefaultConfig = DefaultConfig
 
 instance C.VSConfig DefaultConfig where
-  type Uniform DefaultConfig = ["diffuse" :> V4 Float, "specular" :> V4 Float]
+  type Uniform DefaultConfig =
+    [ "diffuse" :> V4 Float
+    , "specular" :> V4 Float]
   type Attribute DefaultConfig =
     [ "position" :> V3 Float
     , "uv" :> V2 Float
     , "normal" :> V3 Float
     , "color" :> V4 Float]
+  initUniform _ = diffuse @= V4 1 1 1 1
+    <: specular @= V4 1 1 1 1
+    <: Nil
   vertexShaderSource _ = vertexShaderSource
   fragmentShaderSource _ = fragmentShaderSource
 
 type Vertex = C.Vertex DefaultConfig
 
--- mkField "position uv normal color"
+-- mkField "diffuse specular position uv normal color"
+
+diffuse :: FieldOptic "diffuse"
+diffuse = itemAssoc (Proxy :: Proxy "diffuse")
+
+specular :: FieldOptic "specular"
+specular = itemAssoc (Proxy :: Proxy "specular")
 
 position :: FieldOptic "position"
 position = itemAssoc (Proxy :: Proxy "position")
@@ -481,7 +488,8 @@ setViewport (Box (V2 x0 y0) (V2 x1 y1)) = liftIO $ glViewport
 
 -- | Set a diffuse color.
 setDiffuse :: (MonadIO m, Given Window) => V4 Float -> m ()
-setDiffuse col = liftIO $ with col $ \ptr -> glUniform4fv (locationDiffuse given) 1 (castPtr ptr)
+setDiffuse = undefined
+-- setDiffuse col = liftIO $ with col $ \ptr -> glUniform4fv (locationDiffuse given) 1 (castPtr ptr)
 
 drawVertexPlain :: (Given Window, MonadIO m) => M44 Float -> VertexBuffer -> m ()
 drawVertexPlain m = drawVertex m blankTexture
@@ -613,10 +621,10 @@ fragmentShaderSource = "#version 330\n\
   \in vec4 viewPos; \
   \in vec4 color; \
   \uniform sampler2D tex; \
-  \uniform vec4 diffuse; \
-  \uniform vec3 specular; \
+  \uniform vec4 uni_diffuse; \
+  \uniform vec3 uni_specular; \
   \void main(void){ \
-  \  fragColor = texture(tex, texUV) * color * diffuse; \
+  \  fragColor = texture(tex, texUV) * color * uni_diffuse; \
   \}"
 
 
