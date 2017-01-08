@@ -33,6 +33,9 @@ import Linear
 import Control.Monad.State
 import Control.Monad.Identity
 
+--
+-- Primitive types to pass Open GL
+--
 class Storable a => VertexAttrPrim a where
   primType :: proxy a -> GLenum
 
@@ -40,6 +43,8 @@ class Storable a => VertexAttr a where
   attrType :: proxy a -> GLenum
   attrSize :: proxy a -> GLint
   attrNormalized :: proxy a -> GLboolean
+
+type AllVertexAttr = Forall (KeyValue KnownSymbol VertexAttr)
 
 {-
 instance VertexAttrPrim a => VertexAttr a where
@@ -79,23 +84,25 @@ instance VertexAttrPrim a => VertexAttr (V4 a) where
   attrSize _ = 4
   attrNormalized _ = GL_FALSE
 
-type AllVertexAttr = Forall (KeyValue KnownSymbol VertexAttr)
 
+--
+-- Configuration
+--
 class (AllVertexAttr (Uniform conf), AllVertexAttr (Attribute conf))
       => VSConfig conf where
   type Uniform conf :: [Assoc Symbol *]
   type Attribute conf :: [Assoc Symbol *]
   vertexShaderSource :: conf -> String
   fragmentShaderSource :: conf -> String
+  -- TODO: conf -> proxy conf
+
+type Vertex conf = Record (Attribute conf)
 
 vertexAttributes :: VSConfig conf => conf -> IO ()
 vertexAttributes conf0 = do
-  runStateT (Xo.hgenerateFor px (go conf0)) (0, nullPtr)
+  runStateT (Xo.hgenerateFor proxyKVVertexAttr (go conf0)) (0, nullPtr)
   return ()
   where
-    px :: Proxy (KeyValue KnownSymbol VertexAttr)
-    px = Proxy
-
     go :: forall kv conf. (KeyValue KnownSymbol VertexAttr kv, VSConfig conf) =>
           conf -> Membership (Attribute conf) kv -> StateT (GLuint, Ptr ()) IO (Const' () kv)
     go conf ms = do
@@ -112,12 +119,9 @@ vertexAttributes conf0 = do
 
 bindAttribLocation :: VSConfig conf => conf -> GLuint -> IO ()
 bindAttribLocation conf0 program = do
-  runStateT (Xo.hgenerateFor px (go conf0)) 0
+  runStateT (Xo.hgenerateFor proxyKVVertexAttr (go conf0)) 0
   return ()
   where
-    px :: Proxy (KeyValue KnownSymbol VertexAttr)
-    px = Proxy
-
     go :: forall kv conf. (KeyValue KnownSymbol VertexAttr kv, VSConfig conf) =>
           conf -> Membership (Attribute conf) kv -> StateT GLuint IO (Const' () kv)
     go _ ms = do
@@ -130,8 +134,10 @@ bindAttribLocation conf0 program = do
       return (Const' ())
 
 
-type Vertex conf = Record (Attribute conf)
 
+--
+-- To handle storable
+--
 newtype VertexStore conf = VertexStore { getVertexStore :: Vertex conf }
 
 instance VSConfig conf => Storable (VertexStore conf) where
@@ -140,56 +146,48 @@ instance VSConfig conf => Storable (VertexStore conf) where
   peek p = VertexStore <$> peekRecord (castPtr p)
   poke p x = pokeRecord (castPtr p) (getVertexStore x)
 
-sizeOfRecord :: forall xs. AllVertexAttr xs => Record xs -> Int
-sizeOfRecord _ = do
-  execState (Xo.hgenerateFor px go) 0
-  where
-    px :: Proxy (KeyValue KnownSymbol VertexAttr)
-    px = Proxy
+proxyKVVertexAttr :: Proxy (KeyValue KnownSymbol VertexAttr)
+proxyKVVertexAttr = Proxy
 
+sizeOfRecord :: forall xs. AllVertexAttr xs => Record xs -> Int
+sizeOfRecord rc = do
+  execState (Xo.hgenerateFor proxyKVVertexAttr go) 0
+  where
     go :: forall kv. (KeyValue KnownSymbol VertexAttr kv) =>
           Membership xs kv -> State Int (Const' () kv)
     go ms = do
       align <- get
-      let !align' = align + sizeOf (undefined :: AssocValue kv)
+      let !align' = align + sizeOf (runIdentity $ getField $ hlookup ms rc)
       put align'
       return $ Const' ()
 
 peekRecord :: AllVertexAttr xs => Ptr (Record xs) -> IO (Record xs)
 peekRecord ptr = do
-  evalStateT (Xo.hgenerateFor px go) 0
+  evalStateT (Xo.hgenerateFor proxyKVVertexAttr go) 0
   where
-    px :: Proxy (KeyValue KnownSymbol VertexAttr)
-    px = Proxy
-
     go :: forall xs kv. (KeyValue KnownSymbol VertexAttr kv) =>
           Membership xs kv -> StateT Int IO (Field Identity kv)
     go ms = do
       align <- get
-      let !align' = align + sizeOf (undefined :: AssocValue kv)
-      put align'
       x <- liftIO $ peek $ castPtr ptr `plusPtr` align
+      let !align' = align + sizeOf x
+      put align'
       return $ Field (Identity x)
 
 pokeRecord :: forall xs. AllVertexAttr xs => Ptr (Record xs) -> Record xs -> IO ()
 pokeRecord ptr rc = do
-  evalStateT (Xo.hgenerateFor px go) 0
+  evalStateT (Xo.hgenerateFor proxyKVVertexAttr go) 0
   return ()
   where
-    px :: Proxy (KeyValue KnownSymbol VertexAttr)
-    px = Proxy
-
     go :: forall kv. (KeyValue KnownSymbol VertexAttr kv) =>
           Membership xs kv -> StateT Int IO (Const' () kv)
     go ms = do
       align <- get
-      let !align' = align + sizeOf (undefined :: AssocValue kv)
-      put align'
-
       let x = runIdentity $ getField $ hlookup ms rc
+          !align' = align + sizeOf x
+      put align'
       liftIO $ poke (castPtr ptr `plusPtr` align) x
       return $ Const' ()
 
 
--- getIndexArray
 
