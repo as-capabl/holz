@@ -1,4 +1,8 @@
 {-# LANGUAGE FlexibleContexts, Rank2Types, LambdaCase #-}
+{-# LANGUAGE DataKinds, TypeFamilies, TypeOperators #-}
+{-# LANGUAGE MultiParamTypeClasses, KindSignatures #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 ---------------------------------------------------------------------------
 -- |
 -- Copyright   :  (C) 2016 Fumiaki Kinoshita
@@ -30,7 +34,8 @@ module Graphics.Holz.System (withHolz
   , releaseTexture
   , blankTexture
   -- * Vertices
-  , Vertex(..)
+  , Vertex
+  , vertex
   , PrimitiveMode(..)
   , VertexBuffer
   , registerVertex
@@ -64,14 +69,17 @@ module Graphics.Holz.System (withHolz
   ) where
 
 import Codec.Picture
-import Control.Lens
+import Control.Lens hiding ((:>))
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans
 import Control.Monad.Trans.Iter
 import Data.Bits
-import Data.BoundingBox as Box
+import Data.BoundingBox hiding (position)
+import qualified Data.BoundingBox as Box
 import Data.IORef
+import Data.Extensible
+import Data.Proxy
 import Foreign
 import Foreign.C (CFloat)
 import Foreign.C.String
@@ -87,6 +95,7 @@ import qualified Graphics.UI.GLFW as GLFW
 import Graphics.GL
 import Graphics.GL.Ext.EXT.TextureFilterAnisotropic
 import Graphics.Holz.Input
+import qualified Graphics.Holz.VSConfig as C
 import Data.Reflection
 import System.Mem.Weak
 import System.IO.Unsafe
@@ -164,8 +173,8 @@ setOrthographic = do
     setProjection $ ortho x0 x1 y1 y0 (-1) 1
 
 -- | Open a window.
-openWindow :: WindowMode -> Box V2 Float -> IO Window
-openWindow windowmode bbox@(Box (V2 x0 y0) (V2 x1 y1)) = do
+openWindowEx :: C.VSConfig conf => conf -> WindowMode -> Box V2 Float -> IO Window
+openWindowEx conf windowmode bbox@(Box (V2 x0 y0) (V2 x1 y1)) = do
   let ww = floor $ x1 - x0
       wh = floor $ y1 - y0
 
@@ -184,7 +193,7 @@ openWindow windowmode bbox@(Box (V2 x0 y0) (V2 x1 y1)) = do
 
   (fw, fh) <- GLFW.getFramebufferSize win
 
-  prog <- initializeGL
+  prog <- initializeGL conf
 
   rbox <- newIORef $ bbox & Box.size zero .~ fmap fromIntegral (V2 fw fh)
 
@@ -217,6 +226,9 @@ openWindow windowmode bbox@(Box (V2 x0 y0) (V2 x1 y1)) = do
 
   return $ Window rbox win prog locM locP locD locS hk hb hc hs refKeys refChars
 
+openWindow :: WindowMode -> Box V2 Float -> IO Window
+openWindow = openWindowEx DefaultConfig
+
 -- | Close a window.
 closeWindow :: Window -> IO ()
 closeWindow = GLFW.destroyWindow . theWindow
@@ -246,41 +258,18 @@ compileShader src shader = do
     glGetShaderInfoLog shader l nullPtr ptr
     peekCString ptr >>= putStrLn
 
-vertexAttributes :: IO ()
-vertexAttributes = do
-  glVertexAttribPointer 0 3 GL_FLOAT GL_FALSE stride nullPtr
-  glEnableVertexAttribArray 0
-
-  glVertexAttribPointer 1 2 GL_FLOAT GL_FALSE stride pos'
-  glEnableVertexAttribArray 1
-
-  glVertexAttribPointer 2 3 GL_FLOAT GL_FALSE stride pos''
-  glEnableVertexAttribArray 2
-
-  glVertexAttribPointer 3 4 GL_FLOAT GL_FALSE stride pos'''
-  glEnableVertexAttribArray 3
-  where
-    stride = fromIntegral $ sizeOf (undefined :: Vertex)
-    pos' = nullPtr `plusPtr` sizeOf (0 :: V3 CFloat)
-    pos'' = pos' `plusPtr` sizeOf (0 :: V2 CFloat)
-    pos''' = pos'' `plusPtr` sizeOf (0 :: V3 CFloat)
-{-# INLINE vertexAttributes #-}
-
-initializeGL :: IO GLuint
-initializeGL = do
+initializeGL :: C.VSConfig conf => conf -> IO GLuint
+initializeGL conf = do
   vertexShader <- glCreateShader GL_VERTEX_SHADER
   fragmentShader <- glCreateShader GL_FRAGMENT_SHADER
-  compileShader vertexShaderSource vertexShader
-  compileShader fragmentShaderSource fragmentShader
+  compileShader (C.vertexShaderSource conf) vertexShader
+  compileShader (C.fragmentShaderSource conf) fragmentShader
 
   shaderProg <- glCreateProgram
   glAttachShader shaderProg vertexShader
   glAttachShader shaderProg fragmentShader
 
-  withCString "in_Position" $ glBindAttribLocation shaderProg 0
-  withCString "in_UV" $ glBindAttribLocation shaderProg 1
-  withCString "in_Normal" $ glBindAttribLocation shaderProg 2
-  withCString "in_Color" $ glBindAttribLocation shaderProg 3
+  C.bindAttribLocation conf shaderProg
 
   glLinkProgram shaderProg
   glUseProgram shaderProg
@@ -315,11 +304,49 @@ convPrimitiveMode TriangleStrip = GL_TRIANGLE_STRIP
 convPrimitiveMode LineLoop = GL_LINE_LOOP
 {-# INLINE convPrimitiveMode #-}
 
+{-
 data Vertex = Vertex
     {-# UNPACK #-} !(V3 Float) -- x, y, z
     {-# UNPACK #-} !(V2 Float) -- u, v
     {-# UNPACK #-} !(V3 Float) -- normal
     {-# UNPACK #-} !(V4 Float) -- r, g, b, a
+-}
+data DefaultConfig = DefaultConfig
+
+instance C.VSConfig DefaultConfig where
+  type Uniform DefaultConfig = ["diffuse" :> V4 Float, "specular" :> V4 Float]
+  type Attribute DefaultConfig =
+    [ "position" :> V3 Float
+    , "uv" :> V2 Float
+    , "normal" :> V3 Float
+    , "color" :> V4 Float]
+  vertexShaderSource _ = vertexShaderSource
+  fragmentShaderSource _ = fragmentShaderSource
+
+type Vertex = C.Vertex DefaultConfig
+
+-- mkField "position uv normal color"
+
+position :: FieldOptic "position"
+position = itemAssoc (Proxy :: Proxy "position")
+
+uv :: FieldOptic "uv"
+uv = itemAssoc (Proxy :: Proxy "uv")
+
+normal :: FieldOptic "normal"
+normal = itemAssoc (Proxy :: Proxy "normal")
+
+color :: FieldOptic "color"
+color = itemAssoc (Proxy :: Proxy "color")
+
+vertex :: V3 Float -> V2 Float -> V3 Float -> V4 Float -> Vertex
+vertex p u n c = position @= p
+  <: uv @= u
+  <: normal @= n
+  <: color @= c
+  <: Nil
+
+{-
 
 align1 :: Int
 align1 = sizeOf (undefined :: V3 Float)
@@ -352,6 +379,7 @@ instance Storable Vertex where
     poke (ptr' `plusPtr` align3) c
     where ptr' = castPtr ptr
   {-# INLINE poke #-}
+-}
 
 data VertexBuffer = VertexBuffer !GLuint !GLuint !GLenum !GLsizei
 
@@ -412,21 +440,25 @@ releaseTexture :: Texture -> IO ()
 releaseTexture (Texture i) = with i $ glDeleteTextures 1
 
 -- | Send vertices to the graphics driver.
-registerVertex :: MonadIO m => PrimitiveMode -> [Vertex] -> m VertexBuffer
-registerVertex mode vs = liftIO $ do
+registerVertexEx :: forall m conf. (MonadIO m, C.VSConfig conf) =>
+                  conf -> PrimitiveMode -> [C.Vertex conf] -> m VertexBuffer
+registerVertexEx conf mode vs = liftIO $ do
   vao <- overPtr $ glGenVertexArrays 1
   glBindVertexArray vao
   vbo <- overPtr $ glGenBuffers 1
   glBindBuffer GL_ARRAY_BUFFER vbo
-  vertexAttributes
-  let va = V.fromList vs
-  let siz = fromIntegral $ V.length va * sizeOf (undefined :: Vertex)
+  C.vertexAttributes conf
+  let va = V.fromList (map (C.VertexStore :: C.Vertex conf -> C.VertexStore conf) vs)
+  let siz = fromIntegral $ V.length va * sizeOf (undefined :: C.VertexStore conf)
   V.unsafeWith va $ \v -> glBufferData GL_ARRAY_BUFFER siz (castPtr v) GL_STATIC_DRAW
   let vb = VertexBuffer vao vbo (convPrimitiveMode mode) (fromIntegral $ V.length va)
   -- addFinalizer vb $ do
   --  with vao $ glDeleteVertexArrays 1
   --  with vbo $ glDeleteBuffers 1
   return vb
+
+registerVertex :: MonadIO m => PrimitiveMode -> [Vertex] -> m VertexBuffer
+registerVertex = registerVertexEx DefaultConfig
 
 -- | Release a 'VertexBuffer'. The 'VertexBuffer' can't be used after this.
 releaseVertex :: MonadIO m => VertexBuffer -> m ()
@@ -557,20 +589,20 @@ vertexShaderSource :: String
 vertexShaderSource = "#version 330\n\
   \uniform mat4 projection; \
   \uniform mat4 model; \
-  \in vec3 in_Position; \
-  \in vec2 in_UV; \
-  \in vec3 in_Normal; \
-  \in vec4 in_Color; \
+  \in vec3 in_position; \
+  \in vec2 in_uv; \
+  \in vec3 in_normal; \
+  \in vec4 in_color; \
   \out vec2 texUV; \
   \out vec3 normal; \
   \out vec4 viewPos; \
   \out vec4 color; \
   \void main(void) { \
-  \  viewPos = model * vec4(in_Position, 1.0); \
+  \  viewPos = model * vec4(in_position, 1.0); \
   \  gl_Position = projection * viewPos; \
-  \  texUV = in_UV; \
-  \  normal = in_Normal;\
-  \  color = in_Color;\
+  \  texUV = in_uv; \
+  \  normal = in_normal;\
+  \  color = in_color;\
   \}"
 
 fragmentShaderSource :: String
@@ -586,3 +618,5 @@ fragmentShaderSource = "#version 330\n\
   \void main(void){ \
   \  fragColor = texture(tex, texUV) * color * diffuse; \
   \}"
+
+
