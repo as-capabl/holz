@@ -19,9 +19,11 @@ module Graphics.Holz.VSConfig
   ( VSConfig(..)
   , attrUniform
   , Vertex
+  , UniformEnv
   , vertexAttributes
   , bindAttribLocation
   , getUniformLocation
+  , setUniform
   , setInitUniform
   , VertexStore(..)
   ) where
@@ -174,17 +176,24 @@ getUniformLocation conf0 prog = do
       modify (r:)
       return (Const' ())
 
-setInitUniform :: VSConfig conf => conf -> [GLint -> IO ()]
-setInitUniform conf0 =
-  reverse $ execState (Xo.hgenerateFor proxyKVVertexAttr (go conf0)) []
+setUniformHelper :: VSConfig conf => conf -> UniformEnv conf -> [GLint -> IO ()]
+setUniformHelper conf0 env0 =
+  reverse $ execState (Xo.hgenerateFor proxyKVVertexAttr (go conf0 env0)) []
   where
     go :: forall kv conf. (KeyValue KnownSymbol VertexAttr kv, VSConfig conf) =>
-          conf -> Membership (Uniform conf) kv -> State [GLint -> IO ()] (Const' () kv)
-    go conf ms = do
-      let x = runIdentity $ getField $ hlookup ms $ initUniform conf
+          conf -> UniformEnv conf -> Membership (Uniform conf) kv ->
+          State [GLint -> IO ()] (Const' () kv)
+    go conf env ms = do
+      let x = runIdentity $ getField $ hlookup ms $ env
           setInit loc = attrUniform loc 1 x
       modify (setInit :)
       return (Const' ())
+
+setUniform :: VSConfig conf => conf -> [GLint] -> UniformEnv conf -> IO ()
+setUniform conf loc env = sequence_ $ zipWith ($) (setUniformHelper conf env) loc
+
+setInitUniform :: VSConfig conf => conf -> [GLint] -> IO ()
+setInitUniform conf loc = setUniform conf loc (initUniform conf)
 
 --
 -- To handle storable

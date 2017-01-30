@@ -17,6 +17,7 @@
 module Graphics.Holz.System (withHolz
   -- * Window operation
   , Window
+  , openWindowEx
   , openWindow
   , WindowMode(..)
   , Box.Box(..)
@@ -38,6 +39,7 @@ module Graphics.Holz.System (withHolz
   , vertex
   , PrimitiveMode(..)
   , VertexBuffer
+  , registerVertexEx
   , registerVertex
   , releaseVertex
   -- * Drawing region
@@ -50,6 +52,7 @@ module Graphics.Holz.System (withHolz
   , drawVertex
   , drawVertexPlain
   , setDiffuse
+  , updateUniform
   -- * Input (callback)
   , linkKeyboard
   , linkMouseButton
@@ -206,7 +209,7 @@ openWindowEx conf windowmode bbox@(Box (V2 x0 y0) (V2 x1 y1)) = do
   refKeys <- newIORef ([], [])
   refChars <- newIORef ([], [])
 
-  sequence $ zipWith ($) (C.setInitUniform conf) locU
+  C.setInitUniform conf locU
 
   GLFW.setFramebufferSizeCallback win $ Just
     $ \_ w h -> do
@@ -490,6 +493,11 @@ setViewport (Box (V2 x0 y0) (V2 x1 y1)) = liftIO $ glViewport
 setDiffuse :: (MonadIO m, Given Window) => V4 Float -> m ()
 setDiffuse = undefined
 -- setDiffuse col = liftIO $ with col $ \ptr -> glUniform4fv (locationDiffuse given) 1 (castPtr ptr)
+
+updateUniform :: (C.VSConfig conf, Given Window, MonadIO m) => conf -> C.UniformEnv conf -> m ()
+updateUniform conf env =
+  do
+    liftIO $ C.setUniform conf (locationUniform given) env
 
 drawVertexPlain :: (Given Window, MonadIO m) => M44 Float -> VertexBuffer -> m ()
 drawVertexPlain m = drawVertex m blankTexture
